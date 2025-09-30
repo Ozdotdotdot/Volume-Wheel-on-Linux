@@ -5,8 +5,8 @@ import select
 
 print("Volume wheel script is running. Hold Left Alt and scroll the mouse wheel.")
 
-mouse_path = '/dev/input/by-id/usb-Logitech_Gaming_Mouse_G502_177F36563330-event-mouse'
-keyboard_path = '/dev/input/by-id/usb-Razer_Razer_Huntsman-event-kbd'  # Update if needed
+mouse_path = '/dev/input/by-id/usb-Logitech_Gaming_Mouse_G502_177F36563330-event-mouse'   # Adjust this path to your mouse device
+keyboard_path = '/dev/input/by-id/usb-Razer_Razer_Huntsman-event-kbd'                     # Adjust this path to your keyboard device
 
 mouse = evdev.InputDevice(mouse_path)
 keyboard = evdev.InputDevice(keyboard_path)
@@ -14,6 +14,19 @@ keyboard = evdev.InputDevice(keyboard_path)
 alt_held = False
 
 devices = {mouse.fd: mouse, keyboard.fd: keyboard}
+
+def change_volume(direction):
+    print(f"Changing volume: {direction}")
+    if shutil.which('wpctl'):
+        cmd = ['wpctl', 'set-volume', '@DEFAULT_AUDIO_SINK@', '5%+' if direction == 'up' else '5%-']
+    elif shutil.which('pactl'):
+        cmd = ['pactl', 'set-sink-volume', '@DEFAULT_SINK@', '+5%' if direction == 'up' else '-5%']
+    elif shutil.which('amixer'):
+        cmd = ['amixer', 'set', 'Master', '5%+' if direction == 'up' else '5%-']
+    else:
+        print("No supported audio backend found.")
+        return
+    subprocess.run(cmd)
 
 while True:
     r, _, _ = select.select(devices, [], [])
@@ -31,15 +44,3 @@ while True:
                         print("Volume down event detected")
                         change_volume("down")
 
-def change_volume(direction):
-    print(f"Changing volume: {direction}")
-    if shutil.which('wpctl'):
-        cmd = ['wpctl', 'set-volume', '@DEFAULT_AUDIO_SINK@', '5%+' if direction == 'up' else '5%-']
-    elif shutil.which('pactl'):
-        cmd = ['pactl', 'set-sink-volume', '@DEFAULT_SINK@', '+5%' if direction == 'up' else '-5%']
-    elif shutil.which('amixer'):
-        cmd = ['amixer', 'set', 'Master', '5%+' if direction == 'up' else '5%-']
-    else:
-        print("No supported audio backend found.")
-        return
-    subprocess.run(cmd)
