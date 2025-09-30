@@ -1,187 +1,239 @@
+#!/usr/bin/env python3
+import argparse
+import atexit
+import os
+import select
 import shutil
 import subprocess
-import select
-import atexit
+import sys
 
 import evdev
 from evdev import UInputError
 
-print("Volume wheel script is running. Hold Left Alt (or configured button) and scroll the mouse wheel.")
-
-mouse_path = '/dev/input/by-id/usb-Logitech_Gaming_Mouse_G502_177F36563330-event-mouse'   # Adjust this path to your mouse device
-keyboard_path = '/dev/input/by-id/usb-Razer_Razer_Huntsman-event-kbd'                     # Adjust this path to your keyboard device
-
-mouse = evdev.InputDevice(mouse_path)
-keyboard = evdev.InputDevice(keyboard_path)
-
-# Additional input interfaces (e.g. mouse "keyboard" endpoint) that can emit Alt events.
-extra_device_paths = [
-    '/dev/input/by-id/usb-Logitech_Gaming_Mouse_G502_177F36563330-if01-event-kbd',  # Optional: update/remove as needed
-]
-extra_devices = []
-for path in extra_device_paths:
-    try:
-        dev = evdev.InputDevice(path)
-    except OSError as exc:
-        print(f"Warning: extra device {path} unavailable ({exc}).")
-    else:
-        extra_devices.append(dev)
-
-# Track which devices the event loop should monitor.
-devices = {mouse.fd: mouse, keyboard.fd: keyboard}
-for dev in extra_devices:
-    devices[dev.fd] = dev
-
-# Buttons on the mouse that should behave like holding Alt (update as needed).
 MOUSE_ALT_BUTTON_CODES = {
     evdev.ecodes.BTN_EXTRA,
     evdev.ecodes.BTN_SIDE,
 }
 
-# Keyboard key codes that should latch Alt behavior (left/right Alt by default).
 ALT_KEY_CODES = {
     evdev.ecodes.KEY_LEFTALT,
     evdev.ecodes.KEY_RIGHTALT,
 }
 
-# Relative scroll event codes that we should suppress while Alt is held.
 SCROLL_EVENT_CODES = {
     evdev.ecodes.REL_WHEEL,
     evdev.ecodes.REL_HWHEEL,
 }
 
 HIGH_RES_SCROLL_CODES = {
-    getattr(evdev.ecodes, 'REL_WHEEL_HI_RES', None),
-    getattr(evdev.ecodes, 'REL_HWHEEL_HI_RES', None),
+    getattr(evdev.ecodes, "REL_WHEEL_HI_RES", None),
+    getattr(evdev.ecodes, "REL_HWHEEL_HI_RES", None),
 }
 HIGH_RES_SCROLL_CODES.discard(None)
 SCROLL_CODES_TO_SUPPRESS = SCROLL_EVENT_CODES | HIGH_RES_SCROLL_CODES
 
-# Prepare a virtual mouse so we can keep sending non-suppressed events while the real
-# device is grabbed. We only grab while Alt is actually held so normal pointer behaviour
-# stays untouched the rest of the time.
-virtual_mouse = None
-try:
-    source_phys = getattr(mouse, 'phys', None)
-    virtual_phys = f"volume-wheel/{source_phys or 'virtual'}"
-    virtual_mouse = evdev.UInput.from_device(
-        mouse,
-        name=mouse.name,
-        phys=virtual_phys,
-        bustype=mouse.info.bustype,
-        vendor=mouse.info.vendor,
-        product=mouse.info.product,
-        version=mouse.info.version,
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Adjust system volume by holding a modifier and scrolling the mouse wheel.",
     )
-except (OSError, UInputError) as exc:
-    print(f"Warning: could not create virtual mouse (scroll suppression disabled): {exc}")
+    parser.add_argument(
+        "--mouse",
+        default=os.environ.get("VOLUME_WHEEL_MOUSE_PATH"),
+        help="Path to the mouse event device (e.g. /dev/input/by-id/...-event-mouse).",
+    )
+    parser.add_argument(
+        "--keyboard",
+        default=os.environ.get("VOLUME_WHEEL_KEYBOARD_PATH"),
+        help="Path to the keyboard event device that emits Alt presses.",
+    )
+    parser.add_argument(
+        "--extra-devices",
+        default=os.environ.get("VOLUME_WHEEL_EXTRA_PATHS", ""),
+        help="Colon-separated list of additional input event devices that can emit Alt presses.",
+    )
+    parser.add_argument(
+        "--volume-step",
+        default=os.environ.get("VOLUME_WHEEL_STEP", "5%"),
+        help="Volume adjustment step (default 5%%).",
+    )
 
-mouse_grabbed = False
-pending_events = []
-active_alt_sources = set()  # (device.fd, event.code) tuples for currently pressed Alt buttons
-alt_held = False
+    args = parser.parse_args()
+    if not args.mouse or not args.keyboard:
+        parser.error("Mouse and keyboard device paths must be provided (via arguments or environment variables).")
 
-def ensure_mouse_grabbed():
-    global mouse_grabbed
-    if virtual_mouse is None:
-        return False
-    if mouse_grabbed:
-        return True
+    return args
+
+
+def open_device(path: str, label: str) -> evdev.InputDevice:
     try:
-        mouse.grab()
+        device = evdev.InputDevice(path)
     except OSError as exc:
-        print(f"Warning: failed to grab mouse for scroll suppression ({exc}).")
-        return False
+        sys.exit(f"Failed to open {label} device '{path}': {exc}")
+    return device
+
+
+def parse_extra_devices(raw: str) -> list[str]:
+    if not raw:
+        return []
+    return [segment.strip() for segment in raw.split(":") if segment.strip()]
+
+
+def change_volume(step: str, direction: str) -> None:
+    suffix = step if step.endswith("%") else f"{step}%"
+    if shutil.which("wpctl"):
+        delta = f"{suffix}+" if direction == "up" else f"{suffix}-"
+        cmd = ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", delta]
+    elif shutil.which("pactl"):
+        delta = f"+{suffix}" if direction == "up" else f"-{suffix}"
+        cmd = ["pactl", "set-sink-volume", "@DEFAULT_SINK@", delta]
+    elif shutil.which("amixer"):
+        delta = f"{suffix}+" if direction == "up" else f"{suffix}-"
+        cmd = ["amixer", "set", "Master", delta]
     else:
-        mouse_grabbed = True
-        print("Mouse device grabbed; scroll suppression active while Alt is held.")
-        return True
-
-def release_mouse():
-    global mouse_grabbed
-    if not mouse_grabbed:
-        return
-    try:
-        mouse.ungrab()
-    except OSError:
-        pass
-    mouse_grabbed = False
-    pending_events.clear()
-
-if virtual_mouse is not None:
-    atexit.register(release_mouse)
-    atexit.register(virtual_mouse.close)
-
-
-def change_volume(direction):
-    print(f"Changing volume: {direction}")
-    if shutil.which('wpctl'):
-        cmd = ['wpctl', 'set-volume', '@DEFAULT_AUDIO_SINK@', '5%+' if direction == 'up' else '5%-']
-    elif shutil.which('pactl'):
-        cmd = ['pactl', 'set-sink-volume', '@DEFAULT_SINK@', '+5%' if direction == 'up' else '-5%']
-    elif shutil.which('amixer'):
-        cmd = ['amixer', 'set', 'Master', '5%+' if direction == 'up' else '5%-']
-    else:
-        print("No supported audio backend found.")
+        print("Warning: no supported audio backend (wpctl/pactl/amixer) found.")
         return
     subprocess.run(cmd)
 
 
-def handle_alt_transition(device_fd, code, value):
-    global alt_held
-    key = (device_fd, code)
-    before = bool(active_alt_sources)
+def main() -> None:
+    args = parse_args()
 
-    if value != 0:
-        active_alt_sources.add(key)
-    else:
-        active_alt_sources.discard(key)
+    mouse = open_device(args.mouse, "mouse")
+    keyboard = open_device(args.keyboard, "keyboard")
 
-    after = bool(active_alt_sources)
-    alt_held = after
+    extra_devices = []
+    for path in parse_extra_devices(args.extra_devices):
+        try:
+            extra_devices.append(open_device(path, "extra"))
+        except SystemExit:
+            print(f"Warning: skipping unavailable extra device '{path}'.")
 
-    if not virtual_mouse:
-        return
+    devices = {mouse.fd: mouse, keyboard.fd: keyboard}
+    for dev in extra_devices:
+        devices[dev.fd] = dev
 
-    if after and not before:
-        ensure_mouse_grabbed()
-    elif before and not after:
-        release_mouse()
+    volume_step = args.volume_step.rstrip()
 
+    virtual_mouse = None
+    mouse_grabbed = False
+    pending_events: list[evdev.InputEvent] = []
+    active_alt_sources: set[tuple[int, int]] = set()
+    alt_held = False
 
-def forward_mouse_event(event):
-    if not virtual_mouse or not mouse_grabbed:
-        return
+    try:
+        source_phys = getattr(mouse, "phys", None)
+        virtual_phys = f"volume-wheel/{source_phys or 'virtual'}"
+        virtual_mouse = evdev.UInput.from_device(
+            mouse,
+            name=mouse.name,
+            phys=virtual_phys,
+            bustype=mouse.info.bustype,
+            vendor=mouse.info.vendor,
+            product=mouse.info.product,
+            version=mouse.info.version,
+        )
+    except (OSError, UInputError) as exc:
+        print(f"Warning: could not create virtual mouse (scroll suppression disabled): {exc}")
 
-    if alt_held and event.type == evdev.ecodes.EV_REL and event.code in SCROLL_CODES_TO_SUPPRESS:
-        return
-
-    if event.type == evdev.ecodes.SYN_REPORT:
-        if pending_events:
-            for pending in pending_events:
-                virtual_mouse.write_event(pending)
-            virtual_mouse.syn()
-            pending_events.clear()
+    def ensure_mouse_grabbed() -> None:
+        nonlocal mouse_grabbed
+        if virtual_mouse is None or mouse_grabbed:
+            return
+        try:
+            mouse.grab()
+        except OSError as exc:
+            print(f"Warning: failed to grab mouse for scroll suppression ({exc}).")
         else:
-            virtual_mouse.syn()
-    else:
-        pending_events.append(event)
+            mouse_grabbed = True
+            print("Mouse device grabbed; scroll suppression active while modifier is held.")
+
+    def release_mouse() -> None:
+        nonlocal mouse_grabbed
+        if not mouse_grabbed:
+            return
+        try:
+            mouse.ungrab()
+        except OSError:
+            pass
+        mouse_grabbed = False
+        pending_events.clear()
+
+    def cleanup() -> None:
+        release_mouse()
+        if virtual_mouse is not None:
+            virtual_mouse.close()
+
+    atexit.register(cleanup)
+
+    print("Volume wheel helper is running.")
+    print(f"  Mouse device:    {mouse.path}")
+    print(f"  Keyboard device: {keyboard.path}")
+    if extra_devices:
+        for dev in extra_devices:
+            print(f"  Extra device:    {dev.path}")
+    print(f"  Volume step:     {volume_step}")
+    print("Hold Alt (or configured button) and scroll the wheel to change volume.")
+
+    def handle_alt_transition(device_fd: int, code: int, value: int) -> None:
+        nonlocal alt_held
+        key = (device_fd, code)
+        before = bool(active_alt_sources)
+
+        if value:
+            active_alt_sources.add(key)
+        else:
+            active_alt_sources.discard(key)
+
+        after = bool(active_alt_sources)
+        alt_held = after
+
+        if not virtual_mouse:
+            return
+        if after and not before:
+            ensure_mouse_grabbed()
+        elif before and not after:
+            release_mouse()
+
+    def forward_mouse_event(event: evdev.InputEvent) -> None:
+        if not virtual_mouse or not mouse_grabbed:
+            return
+
+        if alt_held and event.type == evdev.ecodes.EV_REL and event.code in SCROLL_CODES_TO_SUPPRESS:
+            return
+
+        if event.type == evdev.ecodes.SYN_REPORT:
+            if pending_events:
+                for pending in pending_events:
+                    virtual_mouse.write_event(pending)
+                virtual_mouse.syn()
+                pending_events.clear()
+            else:
+                virtual_mouse.syn()
+        else:
+            pending_events.append(event)
+
+    try:
+        while True:
+            readable, _, _ = select.select(devices, [], [])
+            for fd in readable:
+                device = devices[fd]
+                for event in device.read():
+                    if event.type == evdev.ecodes.EV_KEY:
+                        if event.code in ALT_KEY_CODES or event.code in MOUSE_ALT_BUTTON_CODES:
+                            handle_alt_transition(fd, event.code, event.value)
+
+                    if device is mouse:
+                        if alt_held and event.type == evdev.ecodes.EV_REL and event.code == evdev.ecodes.REL_WHEEL:
+                            if event.value > 0:
+                                change_volume(volume_step, "up")
+                            elif event.value < 0:
+                                change_volume(volume_step, "down")
+
+                        forward_mouse_event(event)
+    except KeyboardInterrupt:
+        print("Exiting.")
 
 
-while True:
-    r, _, _ = select.select(devices, [], [])
-    for fd in r:
-        device = devices[fd]
-        for event in device.read():
-            if event.type == evdev.ecodes.EV_KEY:
-                if event.code in ALT_KEY_CODES or event.code in MOUSE_ALT_BUTTON_CODES:
-                    handle_alt_transition(fd, event.code, event.value)
-
-            if device is mouse:
-                if alt_held and event.type == evdev.ecodes.EV_REL and event.code == evdev.ecodes.REL_WHEEL:
-                    if event.value > 0:
-                        change_volume('up')
-                    elif event.value < 0:
-                        change_volume('down')
-
-                forward_mouse_event(event)
+if __name__ == "__main__":
+    main()
