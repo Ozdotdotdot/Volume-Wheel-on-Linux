@@ -1,9 +1,12 @@
 import shutil
 import subprocess
-import evdev
 import select
+import atexit
 
-print("Volume wheel script is running. Hold Left Alt and scroll the mouse wheel.")
+import evdev
+from evdev import UInputError
+
+print("Volume wheel script is running. Hold Left Alt (or configured button) and scroll the mouse wheel.")
 
 mouse_path = '/dev/input/by-id/usb-Logitech_Gaming_Mouse_G502_177F36563330-event-mouse'   # Adjust this path to your mouse device
 keyboard_path = '/dev/input/by-id/usb-Razer_Razer_Huntsman-event-kbd'                     # Adjust this path to your keyboard device
@@ -11,9 +14,94 @@ keyboard_path = '/dev/input/by-id/usb-Razer_Razer_Huntsman-event-kbd'           
 mouse = evdev.InputDevice(mouse_path)
 keyboard = evdev.InputDevice(keyboard_path)
 
+# Additional input interfaces (e.g. mouse "keyboard" endpoint) that can emit Alt events.
+extra_device_paths = [
+    '/dev/input/by-id/usb-Logitech_Gaming_Mouse_G502_177F36563330-if01-event-kbd',  # Optional: update/remove as needed
+]
+extra_devices = []
+for path in extra_device_paths:
+    try:
+        dev = evdev.InputDevice(path)
+    except OSError as exc:
+        print(f"Warning: extra device {path} unavailable ({exc}).")
+    else:
+        extra_devices.append(dev)
+
+# Track which devices the event loop should monitor.
+devices = {mouse.fd: mouse, keyboard.fd: keyboard}
+for dev in extra_devices:
+    devices[dev.fd] = dev
+
+# Buttons on the mouse that should behave like holding Alt (update as needed).
+MOUSE_ALT_BUTTON_CODES = {
+    evdev.ecodes.BTN_EXTRA,
+    evdev.ecodes.BTN_SIDE,
+}
+
+# Keyboard key codes that should latch Alt behavior (left/right Alt by default).
+ALT_KEY_CODES = {
+    evdev.ecodes.KEY_LEFTALT,
+    evdev.ecodes.KEY_RIGHTALT,
+}
+
+# Relative scroll event codes that we should suppress while Alt is held.
+SCROLL_EVENT_CODES = {
+    evdev.ecodes.REL_WHEEL,
+    evdev.ecodes.REL_HWHEEL,
+}
+
+HIGH_RES_SCROLL_CODES = {
+    getattr(evdev.ecodes, 'REL_WHEEL_HI_RES', None),
+    getattr(evdev.ecodes, 'REL_HWHEEL_HI_RES', None),
+}
+HIGH_RES_SCROLL_CODES.discard(None)
+SCROLL_CODES_TO_SUPPRESS = SCROLL_EVENT_CODES | HIGH_RES_SCROLL_CODES
+
+# Prepare a virtual mouse so we can keep sending non-suppressed events while the real
+# device is grabbed. We only grab while Alt is actually held so normal pointer behaviour
+# stays untouched the rest of the time.
+virtual_mouse = None
+try:
+    virtual_mouse = evdev.UInput.from_device(mouse, name=f"{mouse.name} (VolumeWheel)")
+except (OSError, UInputError) as exc:
+    print(f"Warning: could not create virtual mouse (scroll suppression disabled): {exc}")
+
+mouse_grabbed = False
+pending_events = []
+active_alt_sources = set()  # (device.fd, event.code) tuples for currently pressed Alt buttons
 alt_held = False
 
-devices = {mouse.fd: mouse, keyboard.fd: keyboard}
+def ensure_mouse_grabbed():
+    global mouse_grabbed
+    if virtual_mouse is None:
+        return False
+    if mouse_grabbed:
+        return True
+    try:
+        mouse.grab()
+    except OSError as exc:
+        print(f"Warning: failed to grab mouse for scroll suppression ({exc}).")
+        return False
+    else:
+        mouse_grabbed = True
+        print("Mouse device grabbed; scroll suppression active while Alt is held.")
+        return True
+
+def release_mouse():
+    global mouse_grabbed
+    if not mouse_grabbed:
+        return
+    try:
+        mouse.ungrab()
+    except OSError:
+        pass
+    mouse_grabbed = False
+    pending_events.clear()
+
+if virtual_mouse is not None:
+    atexit.register(release_mouse)
+    atexit.register(virtual_mouse.close)
+
 
 def change_volume(direction):
     print(f"Changing volume: {direction}")
@@ -28,18 +116,62 @@ def change_volume(direction):
         return
     subprocess.run(cmd)
 
+
+def handle_alt_transition(device_fd, code, value):
+    global alt_held
+    key = (device_fd, code)
+    before = bool(active_alt_sources)
+
+    if value != 0:
+        active_alt_sources.add(key)
+    else:
+        active_alt_sources.discard(key)
+
+    after = bool(active_alt_sources)
+    alt_held = after
+
+    if not virtual_mouse:
+        return
+
+    if after and not before:
+        ensure_mouse_grabbed()
+    elif before and not after:
+        release_mouse()
+
+
+def forward_mouse_event(event):
+    if not virtual_mouse or not mouse_grabbed:
+        return
+
+    if alt_held and event.type == evdev.ecodes.EV_REL and event.code in SCROLL_CODES_TO_SUPPRESS:
+        return
+
+    if event.type == evdev.ecodes.SYN_REPORT:
+        if pending_events:
+            for pending in pending_events:
+                virtual_mouse.write_event(pending)
+            virtual_mouse.syn()
+            pending_events.clear()
+        else:
+            virtual_mouse.syn()
+    else:
+        pending_events.append(event)
+
+
 while True:
     r, _, _ = select.select(devices, [], [])
     for fd in r:
-        for event in devices[fd].read():
-            if devices[fd] == keyboard and event.type == evdev.ecodes.EV_KEY:
-                if event.code == evdev.ecodes.KEY_LEFTALT:
-                    alt_held = event.value != 0
-            if devices[fd] == mouse and event.type == evdev.ecodes.EV_REL and alt_held:
-                if event.code == evdev.ecodes.REL_WHEEL:
+        device = devices[fd]
+        for event in device.read():
+            if event.type == evdev.ecodes.EV_KEY:
+                if event.code in ALT_KEY_CODES or event.code in MOUSE_ALT_BUTTON_CODES:
+                    handle_alt_transition(fd, event.code, event.value)
+
+            if device is mouse:
+                if alt_held and event.type == evdev.ecodes.EV_REL and event.code == evdev.ecodes.REL_WHEEL:
                     if event.value > 0:
-                        print("Volume up event detected")
-                        change_volume("up")
+                        change_volume('up')
                     elif event.value < 0:
-                        print("Volume down event detected")
-                        change_volume("down")
+                        change_volume('down')
+
+                forward_mouse_event(event)
