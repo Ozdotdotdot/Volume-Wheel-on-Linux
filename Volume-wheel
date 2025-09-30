@@ -1,22 +1,22 @@
 import shutil
 import subprocess
 import evdev
-import subprocess
 
-device = evdev.InputDevice('/dev/input/eventX')  # Replace 'X' with your mouse device path
+
+device = evdev.InputDevice('/dev/input/event7')  # Replace '7' with your mouse device path
 
 alt_held = False
 
 for event in device.read_loop():
-    if event.type == evdev.ecodes.EV_KEY:
-        if event.code == evdev.ecodes.KEY_LEFTALT:
-            alt_held = event.value == 1  # 1=pressed, 0=released
-    if event.type == evdev.ecodes.EV_REL and alt_held:
-        if event.code == evdev.ecodes.REL_WHEEL:
+    if event.type == evdev.ecodes.EV_KEY:                         # Check for key events (press/release)
+        if event.code == evdev.ecodes.KEY_LEFTALT:                # Replace with another key if needed
+            alt_held = event.value == 1                           # 1=pressed, 0=released
+    if event.type == evdev.ecodes.EV_REL and alt_held:            # Check for relative events (like wheel) only if Alt is held
+        if event.code == evdev.ecodes.REL_WHEEL:                  # Mouse wheel event
             if event.value > 0:
-                subprocess.run(['amixer', 'set', 'Master', '5%+'])
+                change_volume("up")
             elif event.value < 0:
-                subprocess.run(['amixer', 'set', 'Master', '5%-'])
+                change_volume("down")
 
 
 def change_volume(direction):
@@ -31,9 +31,7 @@ def change_volume(direction):
         return
     subprocess.run(cmd)
 
-if __name__ == "__main__":
-    change_volume("up")   # Try increasing volume
-    change_volume("down") # Try decreasing volume
+
 # This script listens for mouse wheel events while the Alt key is held down
 # and adjusts the system volume accordingly using available audio backends.
     
