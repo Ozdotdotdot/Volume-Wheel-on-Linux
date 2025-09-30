@@ -1,25 +1,38 @@
 import shutil
 import subprocess
 import evdev
+import select
 
+print("Volume wheel script is running. Hold Left Alt and scroll the mouse wheel.")
 
-device = evdev.InputDevice('/dev/input/event7')  # Replace '7' with your mouse device path
+mouse_path = '/dev/input/by-id/usb-Logitech_Gaming_Mouse_G502_177F36563330-event-mouse'
+keyboard_path = '/dev/input/by-id/usb-Razer_Razer_Huntsman-event-kbd'  # Update if needed
+
+mouse = evdev.InputDevice(mouse_path)
+keyboard = evdev.InputDevice(keyboard_path)
 
 alt_held = False
 
-for event in device.read_loop():
-    if event.type == evdev.ecodes.EV_KEY:                         # Check for key events (press/release)
-        if event.code == evdev.ecodes.KEY_LEFTALT:                # Replace with another key if needed
-            alt_held = event.value == 1                           # 1=pressed, 0=released
-    if event.type == evdev.ecodes.EV_REL and alt_held:            # Check for relative events (like wheel) only if Alt is held
-        if event.code == evdev.ecodes.REL_WHEEL:                  # Mouse wheel event
-            if event.value > 0:
-                change_volume("up")
-            elif event.value < 0:
-                change_volume("down")
+devices = {mouse.fd: mouse, keyboard.fd: keyboard}
 
+while True:
+    r, _, _ = select.select(devices, [], [])
+    for fd in r:
+        for event in devices[fd].read():
+            if devices[fd] == keyboard and event.type == evdev.ecodes.EV_KEY:
+                if event.code == evdev.ecodes.KEY_LEFTALT:
+                    alt_held = event.value == 1
+            if devices[fd] == mouse and event.type == evdev.ecodes.EV_REL and alt_held:
+                if event.code == evdev.ecodes.REL_WHEEL:
+                    if event.value > 0:
+                        print("Volume up event detected")
+                        change_volume("up")
+                    elif event.value < 0:
+                        print("Volume down event detected")
+                        change_volume("down")
 
 def change_volume(direction):
+    print(f"Changing volume: {direction}")
     if shutil.which('wpctl'):
         cmd = ['wpctl', 'set-volume', '@DEFAULT_AUDIO_SINK@', '5%+' if direction == 'up' else '5%-']
     elif shutil.which('pactl'):
@@ -30,8 +43,3 @@ def change_volume(direction):
         print("No supported audio backend found.")
         return
     subprocess.run(cmd)
-
-
-# This script listens for mouse wheel events while the Alt key is held down
-# and adjusts the system volume accordingly using available audio backends.
-    
