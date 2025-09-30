@@ -1,0 +1,39 @@
+import shutil
+import subprocess
+import evdev
+import subprocess
+
+device = evdev.InputDevice('/dev/input/eventX')  # Replace 'X' with your mouse device path
+
+alt_held = False
+
+for event in device.read_loop():
+    if event.type == evdev.ecodes.EV_KEY:
+        if event.code == evdev.ecodes.KEY_LEFTALT:
+            alt_held = event.value == 1  # 1=pressed, 0=released
+    if event.type == evdev.ecodes.EV_REL and alt_held:
+        if event.code == evdev.ecodes.REL_WHEEL:
+            if event.value > 0:
+                subprocess.run(['amixer', 'set', 'Master', '5%+'])
+            elif event.value < 0:
+                subprocess.run(['amixer', 'set', 'Master', '5%-'])
+
+
+def change_volume(direction):
+    if shutil.which('wpctl'):
+        cmd = ['wpctl', 'set-volume', '@DEFAULT_AUDIO_SINK@', '5%+' if direction == 'up' else '5%-']
+    elif shutil.which('pactl'):
+        cmd = ['pactl', 'set-sink-volume', '@DEFAULT_SINK@', '+5%' if direction == 'up' else '-5%']
+    elif shutil.which('amixer'):
+        cmd = ['amixer', 'set', 'Master', '5%+' if direction == 'up' else '5%-']
+    else:
+        print("No supported audio backend found.")
+        return
+    subprocess.run(cmd)
+
+if __name__ == "__main__":
+    change_volume("up")   # Try increasing volume
+    change_volume("down") # Try decreasing volume
+# This script listens for mouse wheel events while the Alt key is held down
+# and adjusts the system volume accordingly using available audio backends.
+    
