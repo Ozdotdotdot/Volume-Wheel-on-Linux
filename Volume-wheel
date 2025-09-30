@@ -34,7 +34,7 @@ while True:
         for event in devices[fd].read():
             if devices[fd] == keyboard and event.type == evdev.ecodes.EV_KEY:
                 if event.code == evdev.ecodes.KEY_LEFTALT:
-                    alt_held = event.value == 1
+                    alt_held = event.value != 0
             if devices[fd] == mouse and event.type == evdev.ecodes.EV_REL and alt_held:
                 if event.code == evdev.ecodes.REL_WHEEL:
                     if event.value > 0:
@@ -43,4 +43,3 @@ while True:
                     elif event.value < 0:
                         print("Volume down event detected")
                         change_volume("down")
-
