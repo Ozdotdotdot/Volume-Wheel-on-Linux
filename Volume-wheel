@@ -62,7 +62,17 @@ SCROLL_CODES_TO_SUPPRESS = SCROLL_EVENT_CODES | HIGH_RES_SCROLL_CODES
 # stays untouched the rest of the time.
 virtual_mouse = None
 try:
-    virtual_mouse = evdev.UInput.from_device(mouse, name=f"{mouse.name} (VolumeWheel)")
+    source_phys = getattr(mouse, 'phys', None)
+    virtual_phys = f"volume-wheel/{source_phys or 'virtual'}"
+    virtual_mouse = evdev.UInput.from_device(
+        mouse,
+        name=mouse.name,
+        phys=virtual_phys,
+        bustype=mouse.info.bustype,
+        vendor=mouse.info.vendor,
+        product=mouse.info.product,
+        version=mouse.info.version,
+    )
 except (OSError, UInputError) as exc:
     print(f"Warning: could not create virtual mouse (scroll suppression disabled): {exc}")
 
