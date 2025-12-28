@@ -18,6 +18,8 @@ MOUSE_ALT_BUTTON_CODES = {
 ALT_KEY_CODES = {
     evdev.ecodes.KEY_LEFTALT,
     evdev.ecodes.KEY_RIGHTALT,
+    evdev.ecodes.KEY_LEFTMETA,
+    evdev.ecodes.KEY_RIGHTMETA,
 }
 
 SCROLL_EVENT_CODES = {
@@ -56,6 +58,12 @@ def parse_args() -> argparse.Namespace:
         "--volume-step",
         default=os.environ.get("VOLUME_WHEEL_STEP", "5%"),
         help="Volume adjustment step (default 5%%).",
+    )
+    parser.add_argument(
+        "--no-forward-pointer",
+        action="store_true",
+        default=os.environ.get("VOLUME_WHEEL_NO_FORWARD_POINTER") == "1",
+        help="Do not forward pointer motion while the modifier is held (prevents acceleration jumps).",
     )
 
     args = parser.parse_args()
@@ -114,9 +122,13 @@ def main() -> None:
         devices[dev.fd] = dev
 
     volume_step = args.volume_step.rstrip()
+    no_forward_pointer = bool(args.no_forward_pointer)
 
     virtual_mouse = None
     mouse_grabbed = False
+    rel_caps = set(mouse.capabilities().get(evdev.ecodes.EV_REL, []))
+    high_res_capable = bool(rel_caps & HIGH_RES_SCROLL_CODES)
+    hi_res_accumulator = 0
     pending_events: list[evdev.InputEvent] = []
     active_alt_sources: set[tuple[int, int]] = set()
     alt_held = False
@@ -202,6 +214,13 @@ def main() -> None:
         if alt_held and event.type == evdev.ecodes.EV_REL and event.code in SCROLL_CODES_TO_SUPPRESS:
             return
 
+        if (
+            no_forward_pointer
+            and alt_held
+            and event.type == evdev.ecodes.EV_REL
+        ):
+            return
+
         if event.type == evdev.ecodes.SYN_REPORT:
             if pending_events:
                 for pending in pending_events:
@@ -224,11 +243,21 @@ def main() -> None:
                             handle_alt_transition(fd, event.code, event.value)
 
                     if device is mouse:
-                        if alt_held and event.type == evdev.ecodes.EV_REL and event.code == evdev.ecodes.REL_WHEEL:
-                            if event.value > 0:
-                                change_volume(volume_step, "up")
-                            elif event.value < 0:
-                                change_volume(volume_step, "down")
+                        if alt_held and event.type == evdev.ecodes.EV_REL:
+                            if event.code in HIGH_RES_SCROLL_CODES:
+                                hi_res_accumulator += event.value
+                                while abs(hi_res_accumulator) >= 120:
+                                    if hi_res_accumulator > 0:
+                                        change_volume(volume_step, "up")
+                                        hi_res_accumulator -= 120
+                                    else:
+                                        change_volume(volume_step, "down")
+                                        hi_res_accumulator += 120
+                            elif event.code == evdev.ecodes.REL_WHEEL and not high_res_capable:
+                                if event.value > 0:
+                                    change_volume(volume_step, "up")
+                                elif event.value < 0:
+                                    change_volume(volume_step, "down")
 
                         forward_mouse_event(event)
     except KeyboardInterrupt:
