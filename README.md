@@ -1,6 +1,6 @@
 # Volume Wheel on Linux
 
-A small helper that lets you hold a modifier (for example Left Alt) and use the mouse wheel to change the system volume. While the modifier is pressed the helper suppresses wheel events so foreground apps do not scroll, and it forwards other mouse activity through an injected virtual device so your desktop keeps working as expected.
+A small helper that lets you hold a modifier (for example Left Alt or Super) and use the mouse wheel to change the system volume. While the modifier is pressed the helper suppresses wheel events so foreground apps do not scroll, and it forwards other mouse activity through an injected virtual device so your desktop keeps working as expected.
 
 ![Volume wheel demo](media/volume-wheel.gif)
 
@@ -9,9 +9,9 @@ _Volume OSD opened in the top-right purely for the demo; the helper works withou
 ## Features
 
 - Hold a keyboard key or extra mouse button and scroll to adjust volume in 5% steps (configurable).
-- Detects the best available PipeWire/PulseAudio/ALSA CLI (`wpctl`, `pactl`, `amixer`).
-- Suppresses scroll ticks while the modifier is held.
-- Optional support for extra mouse interfaces that emit the modifier (e.g. Logitech G-series auxiliary buttons).
+- Supports standard and high-resolution wheels; picks `wpctl`/`pactl`/`amixer` automatically.
+- Suppresses scroll ticks while the modifier is held; optional pointer freeze to avoid acceleration jumps.
+- Accepts Alt or Super from the keyboard, BTN_SIDE/BTN_EXTRA, and extra mouse interfaces that emit the modifier.
 - Systemd user service for automatic start on login.
 
 ## Requirements
@@ -31,8 +31,8 @@ cd Volume-Wheel-on-Linux
 The installer will:
 
 1. Let you pick the mouse and keyboard devices from `/dev/input/by-id`.
-2. Offer detected auxiliary interfaces (e.g. `-if01-event-kbd`) that also emit Alt when you press a mouse button.
-3. Install `/etc/udev/hwdb.d/90-volume-wheel.hwdb` and `/etc/udev/rules.d/90-volume-wheel.rules` so the virtual device inherits the same identifiers as your physical mouse.
+2. Offer detected auxiliary interfaces (e.g. `-if01-event-kbd`) that also emit the modifier when you press a mouse button.
+3. Install `/etc/udev/hwdb.d/90-volume-wheel.hwdb` and `/etc/udev/rules.d/90-volume-wheel.rules` so the virtual device inherits the same identifiers/DPI/wheel click angle as your physical mouse.
 4. Ensure `uinput` loads at boot and add your user to the `input` group (you may need to log out/in once).
 5. Create `~/.config/systemd/user/volume-wheel.service` and optionally start it immediately.
 
@@ -45,15 +45,17 @@ python3 Volume-wheel \
   --mouse /dev/input/by-id/usb-Logitech_Gaming_Mouse_G502_XXXXXXXX-event-mouse \
   --keyboard /dev/input/by-id/usb-Razer_Razer_Huntsman-event-kbd \
   --extra-devices /dev/input/by-id/usb-Logitech_Gaming_Mouse_G502_XXXXXXXX-if01-event-kbd \
-  --volume-step 5%
+  --volume-step 5% \
+  --no-forward-pointer   # optional: freeze pointer while the modifier is held
 ```
 
-The `--extra-devices` flag accepts a colon-separated list. Device paths can also be provided through environment variables (`VOLUME_WHEEL_MOUSE_PATH`, `VOLUME_WHEEL_KEYBOARD_PATH`, `VOLUME_WHEEL_EXTRA_PATHS`, `VOLUME_WHEEL_STEP`).
+The `--extra-devices` flag accepts a colon-separated list. Device paths can also be provided through environment variables (`VOLUME_WHEEL_MOUSE_PATH`, `VOLUME_WHEEL_KEYBOARD_PATH`, `VOLUME_WHEEL_EXTRA_PATHS`, `VOLUME_WHEEL_STEP`, `VOLUME_WHEEL_NO_FORWARD_POINTER`).
 
 ## Configuration
 
-- **Modifier source** – by default Left Alt is recognised from both the keyboard and any devices listed in `MOUSE_ALT_BUTTON_CODES`. You can edit `Volume-wheel` to add or remove button codes (see `MOUSE_ALT_BUTTON_CODES` and `ALT_KEY_CODES`).
+- **Modifier source** – by default Left/Right Alt, Left/Right Super, and BTN_SIDE/BTN_EXTRA are recognised (including from any devices listed in `MOUSE_ALT_BUTTON_CODES`). You can edit `Volume-wheel` to add or remove button codes (see `MOUSE_ALT_BUTTON_CODES` and `ALT_KEY_CODES`).
 - **Volume step** – set `VOLUME_WHEEL_STEP=2%` (or use `--volume-step`) to change the percentage applied on each wheel tick.
+- **Pointer forwarding** – set `VOLUME_WHEEL_NO_FORWARD_POINTER=1` (or use `--no-forward-pointer`) to freeze pointer motion while the modifier is held if your desktop applies a different acceleration curve to the virtual device.
 - **Service location** – the systemd unit lives in `~/.config/systemd/user/volume-wheel.service`. Disable it with `systemctl --user disable --now volume-wheel.service` if you want to manage the helper manually.
 
 ## Development Notes
